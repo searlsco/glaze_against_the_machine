@@ -14,9 +14,24 @@ and development checks.
    `update_homebrew_formula.yml` to render `homebrew/glaze_against_the_machine.rb.in`
    with the tag's URL and SHA-256 and commit it to the tap. This also creates
    the formula on the first release.
-4. Wait for the release workflow, then verify with `brew update`,
-   `brew install searlsco/tap/glaze_against_the_machine` (or `brew upgrade`),
-   and `brew test searlsco/tap/glaze_against_the_machine`.
+4. After every release, the releasing agent must update the local installation:
+   refresh the tap, then run `brew upgrade searlsco/tap/glaze_against_the_machine`
+   (or `brew install` if absent). Run `brew test searlsco/tap/glaze_against_the_machine`
+   and verify that the ordinary `glaze_against_the_machine --version` command
+   resolves to Homebrew and reports the released version. Remove any development
+   npm link that shadows it and run `nodenv rehash` when applicable.
+5. Refresh integrations that are already installed, without enabling new ones.
+   Exercise their real uninstall and install commands, preserving plugin
+   configuration and original native provider commands. Verify uninstall removes
+   only the managed integration and reinstall restores the same enabled setup.
+   Reinstall the Codex launcher with the Homebrew CLI. Ensure Claude's local
+   marketplace uses Homebrew's stable `opt` root and update its installed plugin
+   to the released version. If existing Paseo wrappers reference an older path,
+   use the Homebrew CLI to uninstall and reinstall only the Paseo integration,
+   preserving its original provider commands. Verify the active configuration
+   and managed launchers contain no development-checkout or versioned keg paths.
+   Existing agent sessions retain loaded code until reloaded or restarted;
+   do not interrupt them just to refresh the installation.
 
 The organization secret `HOMEBREW_TAP_TOKEN` must be available to this repository
 and grant Contents write access to `searlsco/homebrew-tap`. The workflow's
