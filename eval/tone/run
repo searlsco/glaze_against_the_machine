@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+import { readFile, writeFile, appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { loadavg } from 'node:os';
+import { glaze, defaults } from '../../src/glaze.js';
+import { protectedFailures, validateGrade, wordingDiversity } from './oracles.js';
+import { runJudge } from './judge.js';
+
+const dir = process.env.EVAL_DIR;
+const out = process.env.EVAL_OUT;
+if (process.env.SEARLS_EVAL !== 'tone' || !dir || !out) {
+  console.error('Run script/eval tone; real models are isolated from npm test.');
+  process.exit(2);
+}
+const verdict = { eval: 'tone', status: 'error', reason: '', models: Object.entries(defaults).map(([provider, model]) => `${provider}:${model}`), judge: null, metrics: { loadAvg: loadavg() }, baseline: null, failures: [], costUsd: null };
+let exitCode = 2;
+try {
+  const samples = Number(process.env.EVAL_SAMPLES || 1);
+  if (!Number.isSafeInteger(samples) || samples < 1) throw new Error('--samples must be a positive integer.');
+  const selected = process.env.EVAL_CASES?.split(',').filter(Boolean);
+  if (selected && process.env.EVAL_WRITE_BASELINE === '1') throw new Error('Do not record a baseline from an EVAL_CASES subset.');
+  const allFixtures = JSON.parse(await readFile(join(dir, 'fixtures/cases.json'), 'utf8'));
+  if (selected?.some((id) => !allFixtures.some((row) => row.id === id))) throw new Error('EVAL_CASES contains an unknown fixture id.');
+  const fixtures = allFixtures.filter((row) => selected ? selected.includes(row.id) : process.env.EVAL_FULL === '1' || row.quick);
+  verdict.matrix = { cases: fixtures.map((row) => row.id), samples, full: process.env.EVAL_FULL === '1' && !selected };
+  const items = [];
+  await writeFile(join(out, 'rows.jsonl'), '');
+  for (const provider of Object.keys(defaults)) {
+    for (const fixture of fixtures) {
+      for (let sample = 1; sample <= samples; sample++) {
+        const id = `${provider}/${fixture.id}/${sample}`;
+        console.log(`Rewriting ${id}`);
+        const start = Date.now();
+        let output;
+        try {
+          output = await glaze(fixture.input, { provider, timeout: 90000 });
+        } catch (error) {
+          if (!/Rewrite changed protected (?:code|content)|Rewriter returned an (?:empty|invalid) prompt/.test(error.message)) throw error;
+          verdict.failures.push({ case: id, why: error.message });
+          await appendFile(join(out, 'rows.jsonl'), `${JSON.stringify({ id, provider, case: fixture.id, sample, rejected: error.message })}\n`);
+          continue;
+        }
+        const row = { id, provider, model: defaults[provider], case: fixture.id, sample, source: fixture.source, input: fixture.input, output, seconds: (Date.now() - start) / 1000 };
+        const failures = protectedFailures(fixture, output);
+        for (const why of failures) verdict.failures.push({ case: id, why });
+        await appendFile(join(out, 'rows.jsonl'), `${JSON.stringify({ ...row, protectedPassed: failures.length === 0 })}\n`);
+        items.push({ id, input: fixture.input, output, measureWording: fixture.measureWording, requirements: fixture.requirements });
+      }
+    }
+  }
+  if (!items.length) throw new Error('All rewrites were rejected; no model output available to judge.');
+  const rewrites = items.length;
+  const itemsPath = join(out, 'judge-items.jsonl');
+  const gradePath = join(out, 'judge-verdicts.jsonl');
+  await writeFile(itemsPath, items.map((row) => JSON.stringify(row)).join('\n') + '\n');
+  const summary = await runJudge(join(dir, 'rubric.md'), itemsPath, gradePath);
+  verdict.judge = summary.judge;
+  // eval-judge reports judge cost only; provider CLI rewrite cost is unavailable.
+  verdict.judgeCostUsd = summary.costUsd;
+  const grades = (await readFile(gradePath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  const byId = new Map(grades.map((grade) => [grade.id, grade]));
+  for (const item of items) {
+    const grade = byId.get(item.id);
+    if (!validateGrade(grade)) throw new Error(`Missing or malformed judge grade for ${item.id}.`);
+    if (!grade.faithful || !grade.professional || !grade.supportive) verdict.failures.push({ case: item.id, why: grade.reason });
+  }
+  const mean = (key) => grades.reduce((sum, grade) => sum + grade[key], 0) / items.length;
+  verdict.metrics = { ...verdict.metrics, cases: rewrites,
+    faithfulRate: mean('faithful'), professionalRate: mean('professional'), supportiveRate: mean('supportive'), warmth: mean('warmth'), typography: mean('typography'),
+    wordingDiversity: wordingDiversity(items) };
+  let baselines = { judges: {} };
+  try { baselines = JSON.parse(await readFile(join(dir, 'baseline.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  verdict.baseline = baselines.judges[verdict.judge] ?? null;
+  verdict.status = verdict.failures.length ? 'fail' : 'pass';
+  verdict.reason = verdict.failures.length ? `${verdict.failures.length} hard oracle failures` : `${rewrites} rewrites passed exact preservation and model-judged faithfulness/professionalism/support; soft style metrics reported${verdict.baseline ? '' : '; no baseline for this judge'}`;
+  exitCode = verdict.status === 'pass' ? 0 : 1;
+  if (process.env.EVAL_WRITE_BASELINE === '1' && exitCode !== 0) console.log('Refusing to baseline a failing run.');
+  if (process.env.EVAL_WRITE_BASELINE === '1' && exitCode === 0) {
+    verdict.metrics.loadAvgAtFinish = loadavg();
+    if (verdict.metrics.loadAvgAtFinish[0] > 40) throw new Error('Refusing to baseline under 1-minute load above 40.');
+    delete baselines.reason;
+    baselines.judges[verdict.judge] = { recordedAt: new Date().toISOString(), models: verdict.models, full: process.env.EVAL_FULL === '1', samples, metrics: verdict.metrics, reason: 'Verified reference for constructive rewrites with naturally integrated appreciation and encouragement; soft style means are descriptive.' };
+    await writeFile(join(dir, 'baseline.json'), JSON.stringify(baselines, null, 2) + '\n');
+    console.log('Recorded passing baseline.');
+  }
+} catch (error) {
+  verdict.status = error.code === 'ENOENT' || /not installed or is not on PATH/.test(error.message) ? 'skip' : 'error';
+  verdict.reason = error.message;
+  exitCode = verdict.status === 'skip' ? 3 : 2;
+}
+await writeFile(join(out, 'verdict.json'), JSON.stringify(verdict, null, 2) + '\n');
+process.exitCode = exitCode;

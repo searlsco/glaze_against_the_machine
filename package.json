@@ -1,0 +1,35 @@
+{
+  "name": "@searlsco/glaze_against_the_machine",
+  "version": "0.3.1",
+  "description": "Managing your agent's emotions shouldn't be your job.",
+  "type": "module",
+  "bin": {
+    "glaze_against_the_machine": "bin/glaze_against_the_machine.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:claude": "claude plugin test",
+    "check": "node --check bin/glaze_against_the_machine.js && node --check src/glaze.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/searlsco/glaze_against_the_machine.git"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    ".claude-plugin",
+    "eval",
+    "script",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

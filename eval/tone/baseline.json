@@ -1,0 +1,40 @@
+{
+  "reason": "Natural, concise appreciation and encouragement replace required framing and sentiment tiers. No current baseline has been recorded; the prior design is retained as history.",
+  "judges": {},
+  "previousDesign": {
+    "judges": {
+      "claude:claude-sonnet-5-5": {
+        "recordedAt": "2026-10-19T23:58:50.219Z",
+        "models": [
+          "claude:haiku",
+          "codex:gpt-6-luna"
+        ],
+        "full": true,
+        "samples": 1,
+        "metrics": {
+          "loadAvg": [
+            8.095703125,
+            8.9521484375,
+            9.31494140625
+          ],
+          "cases": 30,
+          "sentimentComparisons": 2,
+          "sentimentScalingRate": 1,
+          "faithfulRate": 1,
+          "professionalRate": 1,
+          "encouragingRate": 1,
+          "warmth": 3.96875,
+          "typography": 4.5,
+          "loadAvgAtFinish": [
+            8.37158203125,
+            8.7041015625,
+            9.13232421875
+          ]
+        },
+        "reason": "Verified reference after scaling model-written positivity with prompt negativity and isolating generators and judges; soft style means are descriptive.",
+        "receipt": ".build/evals/tone/20261019T235542Z/verdict.json",
+        "originalRows": ".build/evals/tone/20261019T235542Z/rows.jsonl"
+      }
+    }
+  }
+}

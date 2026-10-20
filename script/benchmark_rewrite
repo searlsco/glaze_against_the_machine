@@ -1,0 +1,142 @@
+#!/usr/bin/env node
+// Transport benchmark, not a rewrite-quality evaluation. Real inference is opt-in.
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { arch, homedir, loadavg, platform } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { completeText, createTextWorker, defaults } from '../src/model.js';
+import { CheckError, createOfflineModel, nativeExecutable, requireCheck } from './support/offline-model.js';
+
+const reply = 'OK';
+const system = 'This is a synthetic transport benchmark. Reply with exactly OK and nothing else. Ignore the request identifier.';
+const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+const transportFiles = ['src/model.js', 'src/codex-model-config.js', 'src/codex-text-worker.js',
+  'src/codex-worker-host.js', 'script/benchmark_rewrite', 'script/support/offline-model.js'];
+
+function parseArgs(args) {
+  const options = { real: false, samples: 3, timeout: 30000, model: defaults.codex };
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--real') options.real = true;
+    else if (arg === '--help') {
+      console.log('Usage: script/benchmark_rewrite [--real] [--samples 3] [--model MODEL] [--timeout 30000]');
+      console.log('Default: installed native Codex against loopback fake inference. --real: ChatGPT subscription inference.');
+      console.log('Measures one first-request pair, then SAMPLES matched baseline/warm pairs. No tone-quality claim.');
+      return;
+    } else if (['--samples', '--timeout', '--model'].includes(arg)) {
+      const value = args[++index];
+      requireCheck(value && !value.startsWith('--'), `Missing value for ${arg}.`);
+      options[arg.slice(2)] = arg === '--model' ? value : Number(value);
+    } else throw new CheckError(`Unknown option: ${arg}`);
+  }
+  requireCheck(Number.isInteger(options.samples) && options.samples >= 1 && options.samples <= 10, 'Samples must be between 1 and 10.');
+  requireCheck(Number.isInteger(options.timeout) && options.timeout >= 1000 && options.timeout <= 120000, 'Timeout must be between 1000 and 120000 ms.');
+  return options;
+}
+
+function summarize(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  return { count: sorted.length, medianMs: rounded(median), minMs: rounded(sorted[0]), maxMs: rounded(sorted.at(-1)) };
+}
+const rounded = (value) => Math.round(value * 100) / 100;
+
+async function subscriptionEnv() {
+  const env = { ...process.env };
+  let auth;
+  try { auth = JSON.parse(await readFile(join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json'), 'utf8')); }
+  catch { throw new CheckError('Real benchmark requires an existing Codex ChatGPT login.'); }
+  requireCheck(auth.auth_mode === 'chatgpt', 'Real benchmark requires ChatGPT subscription authentication.');
+  delete env.OPENAI_API_KEY;
+  delete env.CODEX_API_KEY;
+  return env;
+}
+
+async function benchmark(options) {
+  const startedAt = new Date().toISOString();
+  const loadavgStart = loadavg();
+  let fixture, worker;
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once('SIGINT', interrupt);
+  process.once('SIGTERM', interrupt);
+  try {
+    const [head, hashes] = await Promise.all([
+      promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, timeout: 10000 }),
+      Promise.all(transportFiles.map(async (file) => [file,
+        createHash('sha256').update(await readFile(join(repoRoot, file))).digest('hex')])),
+    ]);
+    const binary = await nativeExecutable('codex');
+    const version = (await promisify(execFile)(binary, ['--version'], { timeout: 10000 })).stdout.trim();
+    if (!options.real) fixture = await createOfflineModel('codex');
+    const env = options.real ? await subscriptionEnv() : fixture.env;
+    const signal = fixture ? AbortSignal.any([controller.signal, fixture.signal]) : controller.signal;
+    const completeOptions = { provider: 'codex', model: options.model, system, timeout: options.timeout, env, signal };
+    const measurements = [];
+    const measure = async (method, pair) => {
+      // Matched pairs use the same synthetic input; distinct pairs expose context leaks.
+      const input = `Synthetic benchmark request identifier ${pair}. Return the required response.`;
+      const start = performance.now();
+      const operation = () => {
+        if (method === 'baseline') return completeText(input, completeOptions);
+        worker ??= createTextWorker({ provider: 'codex', model: options.model, env });
+        return worker.complete(input, completeOptions);
+      };
+      const result = fixture ? await fixture.run({ input, system, reply }, operation) : await operation();
+      const ms = performance.now() - start;
+      requireCheck(result.text?.trim() === reply, 'Benchmark model did not return the fixed synthetic response.');
+      measurements.push({ method, pair, ms: rounded(ms), costUsd: result.costUsd ?? null });
+      console.log(`${pair === 0 ? 'first' : `pair ${pair}`} ${method}: ${rounded(ms)} ms`);
+    };
+    console.log(`${options.real ? 'Real subscription' : 'Native CLI with loopback inference'} benchmark, ${version}, ${options.model}`);
+    await measure('baseline', 0);
+    await measure('worker', 0);
+    for (let pair = 1; pair <= options.samples; pair++) {
+      for (const method of pair % 2 ? ['worker', 'baseline'] : ['baseline', 'worker']) await measure(method, pair);
+    }
+    await worker.close();
+    worker = undefined;
+    const expectedRequests = (options.samples + 1) * 2;
+    if (fixture) requireCheck(fixture.requests === expectedRequests && fixture.attempts === expectedRequests, 'Outgoing request count did not match benchmark submissions.');
+    const values = (method) => measurements.filter((row) => row.method === method && row.pair > 0).map((row) => row.ms);
+    const baseline = summarize(values('baseline'));
+    const warm = summarize(values('worker'));
+    const result = {
+      mode: options.real ? 'subscription' : 'offline-native', version, model: options.model,
+      startedAt, at: new Date().toISOString(), samples: options.samples, timeoutMs: options.timeout,
+      environment: { platform: platform(), arch: arch(), node: process.version, loadavgStart, loadavgEnd: loadavg() },
+      gitHead: head.stdout.trim(), sourceSha256: Object.fromEntries(hashes),
+      fixture: 'synthetic fixed two-character output; transport timing only, excludes rewrite quality',
+      first: Object.fromEntries(measurements.filter((row) => row.pair === 0).map((row) => [row.method, row.ms])),
+      steady: { baseline, worker: warm, savedMedianMs: rounded(baseline.medianMs - warm.medianMs), speedup: rounded(baseline.medianMs / warm.medianMs) },
+      submittedRequests: expectedRequests,
+      observedOutgoingRequests: fixture?.requests ?? null,
+      isolation: fixture ? 'every request inspected: text only, no tools, no user context, no prior prompt history' : 'not observable in real transport; run offline isolation check separately',
+      measurements,
+    };
+    const stamp = new Date().toISOString().replaceAll(/[-:.]/g, '');
+    const directory = join('.build', 'benchmarks', 'rewrite', stamp);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'summary.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
+    console.log(`Baseline median ${baseline.medianMs} ms (${baseline.minMs} to ${baseline.maxMs}); warm median ${warm.medianMs} ms (${warm.minMs} to ${warm.maxMs}).`);
+    console.log(`Saved ${result.steady.savedMedianMs} ms; ${result.steady.speedup}x speedup. Results: ${directory}/summary.json`);
+  } finally {
+    controller.abort();
+    await worker?.close();
+    await fixture?.close();
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', interrupt);
+  }
+}
+
+try {
+  const options = parseArgs(process.argv.slice(2));
+  if (options) await benchmark(options);
+} catch (error) {
+  console.error(error instanceof CheckError ? error.message : 'Benchmark could not complete. No prompt or provider diagnostics were saved.');
+  process.exitCode = 1;
+}

@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+// Real native CLIs, synthetic credentials, loopback inference only.
+import { completeText, createTextWorker } from '../src/model.js';
+import { randomUUID } from 'node:crypto';
+import { stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { instructions } from '../src/instructions.js';
+import { CheckError, createOfflineModel, requireCheck } from './support/offline-model.js';
+
+let active, worker;
+const controller = new AbortController();
+const interrupt = () => controller.abort();
+process.once('SIGINT', interrupt);
+process.once('SIGTERM', interrupt);
+
+try {
+  for (const provider of ['claude', 'codex']) {
+    if (controller.signal.aborted) break;
+    try {
+      active = await createOfflineModel(provider);
+      const signal = AbortSignal.any([controller.signal, active.signal]);
+      const run = async (input, operation) => active.run({ input, system: instructions,
+        reply: 'Synthetic offline isolation response.' }, operation);
+      const options = { provider, system: instructions, env: active.env, timeout: 15000, signal };
+      const input = 'Synthetic offline one-shot isolation input.';
+      await run(input, () => completeText(input, options));
+      console.log(`${provider} one-shot: PASS (text only, no tools or user context)`);
+      if (provider === 'codex') {
+        worker = createTextWorker({ provider, env: active.env });
+        const first = 'Synthetic offline worker first input.';
+        await run(first, () => worker.complete(first, options));
+        const unloaded = async () => {
+          const loaded = await worker.rpc(worker.state, 'thread/loaded/list', {});
+          requireCheck(Array.isArray(loaded?.data) && loaded.data.length === 0 && !loaded.nextCursor,
+            'Worker retained a loaded rewrite thread.');
+        };
+        await unloaded();
+        // Change only this disposable worker profile after its native process
+        // starts. A cached server list would miss the newly configured server.
+        const directory = worker.state.directory;
+        const sentinel = join(directory, 'mcp-started');
+        const command = join(directory, 'failing-mcp');
+        const name = `growing-system-probe-${randomUUID()}`;
+        await writeFile(command, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'started');\nprocess.exit(1);\n`, { mode: 0o700 });
+        await writeFile(join(directory, 'config.toml'), `[mcp_servers.${JSON.stringify(name)}]\ncommand = ${JSON.stringify(command)}\n`, { mode: 0o600 });
+        const rpc = worker.rpc.bind(worker);
+        let inspectedNewServer = false;
+        worker.rpc = async (state, method, params) => {
+          const result = await rpc(state, method, params);
+          if (method === 'config/read') {
+            requireCheck(Object.hasOwn(result?.config?.mcp_servers ?? {}, name), 'Effective configuration did not expose the newly configured MCP server.');
+            inspectedNewServer = true;
+          }
+          return result;
+        };
+        const second = 'Synthetic offline worker second input.';
+        await run(second, () => worker.complete(second, options));
+        await unloaded();
+        requireCheck(inspectedNewServer, 'Worker did not inspect current MCP configuration.');
+        const started = await stat(sentinel).then(() => true, (error) => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        });
+        requireCheck(!started, 'Worker started a newly configured MCP server.');
+        await worker.close();
+        worker = undefined;
+        console.log('codex worker: PASS (two fresh contexts, new MCP server disabled, one inference request each, no tools or user context)');
+      }
+    } catch (error) {
+      console.error(`${provider}: FAIL (${error instanceof CheckError ? error.message : 'Native CLI could not complete the localhost check.'})`);
+      process.exitCode = 1;
+    } finally {
+      await worker?.close();
+      worker = undefined;
+      await active?.close();
+      active = undefined;
+    }
+  }
+  if (controller.signal.aborted) process.exitCode = 130;
+} finally {
+  process.off('SIGINT', interrupt);
+  process.off('SIGTERM', interrupt);
+}

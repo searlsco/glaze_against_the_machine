@@ -1,0 +1,17 @@
+{
+  "name": "glaze-against-the-machine",
+  "version": "0.3.1",
+  "description": "Rewrites frustrated prompts before they reach Claude or legacy prompt hooks.",
+  "author": {
+    "name": "Searls LLC"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Rewrite model",
+      "description": "Fast model used to polish each submitted prompt.",
+      "default": "haiku"
+    }
+  }
+}

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Quality evals: the contract is the quality-eval skill
+# (~/icloud-drive/dotfiles/.claude/skills/quality-eval/SKILL.md).
+#
+#   script/eval                      list evals and their hypotheses
+#   script/eval <name>... | --all    run them
+#     --samples N  --write-baseline  --full
+#
+# Each eval is eval/<name>/run, an executable that receives EVAL_NAME,
+# EVAL_DIR (its eval/<name>), EVAL_OUT (this run's output dir),
+# EVAL_SAMPLES, EVAL_FULL (and EVAL_NIGHTLY, kept for evals not yet
+# updated), EVAL_WRITE_BASELINE and SEARLS_EVAL=<name>,
+# writes $EVAL_OUT/rows.jsonl and $EVAL_OUT/verdict.json, and exits
+# 0 pass, 1 fail, 2 error, 3 skip. Shared runner, with discovery adapted
+# to this project's requested singular eval/ directory.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+root=$PWD
+
+list() {
+  for d in eval/*/; do
+    [ -x "$d/run" ] || continue
+    name=$(basename "$d")
+    hyp=$(grep -m1 -i '^\*\*hypothesis' "$d/README.md" 2>/dev/null | sed 's/^\*\*[^*]*\*\*[: ]*//')
+    printf '%-28s %s\n' "$name" "${hyp:-(see eval/$name/README.md)}"
+  done
+}
+
+names=() samples="" full=0 write_baseline=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all) for d in eval/*/; do [ -x "$d/run" ] && names+=("$(basename "$d")"); done ;;
+    --samples) samples=$2; shift ;;
+    --full|--nightly) full=1 ;;
+    --write-baseline) write_baseline=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -*) echo "script/eval: unknown flag $1" >&2; exit 2 ;;
+    *) names+=("$1") ;;
+  esac
+  shift
+done
+[ ${#names[@]} -eq 0 ] && { list; exit 0; }
+
+worst=0
+for name in "${names[@]}"; do
+  dir="$root/eval/$name"
+  [ -x "$dir/run" ] || { echo "script/eval: no eval/$name/run" >&2; worst=2; continue; }
+  out="$root/.build/evals/$name/$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$out"
+  start=$(date +%s)
+  EVAL_NAME=$name EVAL_DIR=$dir EVAL_OUT=$out EVAL_SAMPLES=$samples \
+    EVAL_FULL=$full EVAL_NIGHTLY=$full EVAL_WRITE_BASELINE=$write_baseline SEARLS_EVAL=$name \
+    "$dir/run" 2>&1 | tee "$out/run.log"
+  code=${PIPESTATUS[0]}
+  if [ ! -f "$out/verdict.json" ]; then
+    printf '{"eval":"%s","status":"error","reason":"run exited %s without a verdict"}\n' "$name" "$code" > "$out/verdict.json"
+    [ "$code" -eq 0 ] && code=2
+  fi
+  python3 - "$out/verdict.json" "$(git rev-parse --short HEAD)" "$([ -n "$(git status --porcelain)" ] && echo true || echo false)" "$(( $(date +%s) - start ))" <<'PY'
+import json, platform, socket, subprocess, sys
+path, ref, dirty, seconds = sys.argv[1:]
+v = json.load(open(path))
+v.setdefault("gitRef", ref); v.setdefault("dirty", dirty == "true")
+v.setdefault("machine", socket.gethostname().split(".")[0])
+v.setdefault("os", "macOS " + subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip())
+v.setdefault("seconds", int(seconds))
+json.dump(v, open(path, "w"), ensure_ascii=False, indent=1)
+PY
+  echo "verdict: $out/verdict.json ($(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["status"]+": "+v.get("reason",""))' "$out/verdict.json"))"
+  [ "$code" -gt "$worst" ] && [ "$code" -ne 3 ] && worst=$code
+  [ "$code" -eq 3 ] && [ "$worst" -eq 0 ] && worst=3
+done
+exit $worst

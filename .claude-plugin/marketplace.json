@@ -1,0 +1,6 @@
+{
+  "name": "glaze-against-the-machine-local",
+  "metadata": { "description": "Glaze Against the Machine's local development marketplace." },
+  "owner": { "name": "Searls LLC" },
+  "plugins": [{ "name": "glaze-against-the-machine", "source": "./", "description": "Managing your agent's emotions shouldn't be your job." }]
+}

@@ -1,0 +1,57 @@
+#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { hostname, loadavg, release } from 'node:os';
+import { join } from 'node:path';
+import { glaze, defaults } from '../../src/glaze.js';
+import { runMatrix, settings } from './experiment.js';
+import { metrics, renderReport, summaryText } from './report.js';
+
+const dir = process.env.EVAL_DIR;
+const out = process.env.EVAL_OUT;
+if (process.env.SEARLS_EVAL !== 'rewrite-timing' || !dir || !out) {
+  console.error('Run script/eval rewrite-timing; real models never run in npm test.');
+  process.exit(2);
+}
+const start = performance.now();
+const verdict = { eval: 'rewrite-timing', status: 'error', reason: '', judge: null, qualityAssessed: false,
+  startedAt: new Date().toISOString(), models: [], timeoutMs: null, metrics: { loadAvg: loadavg() },
+  machine: hostname(), os: `${process.platform} ${release()}`, node: process.version,
+  baseline: null, failures: [], costUsd: null };
+let rows = [];
+let exitCode = 2;
+const controller = new AbortController();
+const interrupt = () => controller.abort();
+process.once('SIGINT', interrupt);
+process.once('SIGTERM', interrupt);
+try {
+  verdict.gitRef = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  verdict.dirty = Boolean(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim());
+  const fixtures = JSON.parse(await readFile(join(dir, 'fixtures/cases.json'), 'utf8'));
+  const options = settings(process.env, fixtures, defaults);
+  verdict.models = Object.entries(options.models).map(([provider, model]) => `${provider}:${model}`);
+  verdict.timeoutMs = options.timeout;
+  verdict.matrix = { cases: options.fixtures.map((fixture) => fixture.id), samples: options.samples };
+  await writeFile(join(out, 'rows.jsonl'), '');
+  console.log(`${options.fixtures.length} cases × ${Object.keys(options.models).length} providers × ${options.samples} samples. No model judge; quality is ungraded.`);
+  await runMatrix(options, { rewrite: glaze, signal: controller.signal, onRow: async (row) => {
+    rows.push(row);
+    await appendFile(join(out, 'rows.jsonl'), JSON.stringify(row) + '\n');
+    console.log(`\n${row.id}: ${row.status} in ${row.seconds.toFixed(3)} s\nBefore:\n${row.input}\nAfter:\n${row.output ?? `[No accepted rewrite: ${row.error}]`}`);
+  } });
+  verdict.failures = rows.filter((row) => row.status !== 'completed').map((row) => ({ case: row.id, why: row.error }));
+  verdict.status = controller.signal.aborted ? 'error' : rows.every((row) => row.status === 'unavailable') ? 'skip' : verdict.failures.length ? 'error' : 'pass';
+  verdict.reason = `${controller.signal.aborted ? 'Interrupted; ' : ''}${rows.filter((row) => row.status === 'completed').length}/${options.fixtures.length * Object.keys(options.models).length * options.samples} rewrites completed; quality ungraded`;
+  if (verdict.status === 'skip') verdict.reason = `Missing provider CLIs: ${[...new Set(rows.map((row) => row.provider))].join(', ')}; ${verdict.reason}`;
+  exitCode = { pass: 0, error: 2, skip: 3 }[verdict.status];
+} catch (error) {
+  verdict.reason = error.message;
+}
+process.off('SIGINT', interrupt);
+process.off('SIGTERM', interrupt);
+verdict.seconds = (performance.now() - start) / 1000;
+verdict.metrics = { ...verdict.metrics, ...metrics(rows), loadAvgAtFinish: loadavg() };
+await writeFile(join(out, 'verdict.json'), JSON.stringify(verdict, null, 2) + '\n');
+await writeFile(join(out, 'report.html'), renderReport(rows, verdict));
+console.log(`\n${summaryText(verdict.metrics)}\nReport: ${join(out, 'report.html')}\nVerdict: ${join(out, 'verdict.json')}`);
+process.exitCode = exitCode;
