@@ -4,7 +4,9 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const root = fileURLToPath(new URL('../', import.meta.url));
+// Package managers can provide stable paths that survive versioned keg cleanup.
+export const root = process.env.GLAZE_AGAINST_THE_MACHINE_ROOT || fileURLToPath(new URL('../', import.meta.url));
+export const nodeExecutable = process.env.GLAZE_AGAINST_THE_MACHINE_NODE || process.execPath;
 const marker = '# Managed by glaze_against_the_machine';
 const legacyMarker = '# Managed by prompt-glazer';
 const legacyPluginId = 'prompt-glazer@prompt-glazer-local';
@@ -49,7 +51,7 @@ export async function install({ target, binDir = join(homedir(), '.local', 'bin'
     if (remove) {
       try { await unlink(paths[i]); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     } else {
-      const content = `#!/bin/sh\n${marker}\nexec ${quote(process.execPath)} ${quote(join(root, 'bin', 'glaze_against_the_machine.js'))} ${launchers[i]} "$@"\n`;
+      const content = `#!/bin/sh\n${marker}\nexec ${quote(nodeExecutable)} ${quote(join(root, 'bin', 'glaze_against_the_machine.js'))} ${launchers[i]} "$@"\n`;
       await writeFile(paths[i], content, { mode: 0o755 });
     }
     try { await unlink(legacyPaths[i]); } catch (error) { if (error.code !== 'ENOENT') throw error; }

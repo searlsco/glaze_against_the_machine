@@ -2,7 +2,7 @@ import { access, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/p
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root } from './install.js';
+import { root, nodeExecutable } from './install.js';
 
 const providers = ['claude', 'codex'];
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -144,7 +144,7 @@ export async function installPaseo({ home, remove = false, env = process.env } =
       const command = own(provider, 'command') ? provider.command : binary && [binary];
       if (!command) continue;
       const path = join(directory, `paseo-${name}`);
-      const content = `#!/bin/sh\n# Managed by glaze_against_the_machine for Paseo\nexec ${[process.execPath, join(root, 'bin', 'glaze_against_the_machine.js'), 'paseo', name, '--', ...command].map(quote).join(' ')} "$@"\n`;
+      const content = `#!/bin/sh\n# Managed by glaze_against_the_machine for Paseo\nexec ${[nodeExecutable, join(root, 'bin', 'glaze_against_the_machine.js'), 'paseo', name, '--', ...command].map(quote).join(' ')} "$@"\n`;
       // A missing state file does not authorize adopting a preexisting wrapper.
       try { await lstat(path); throw new Error(`Refusing to replace an unrelated Paseo wrapper: ${path}`); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }

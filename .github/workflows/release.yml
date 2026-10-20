@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
+          const version = read('package.json').version;
+          assert.match(version, /^\d+\.\d+\.\d+$/);
+          assert.equal(process.env.RELEASE_TAG, `v${version}`);
+          assert.equal(read('package-lock.json').version, version);
+          assert.equal(read('package-lock.json').packages[''].version, version);
+          assert.equal(read('.claude-plugin/plugin.json').version, version);
+          JS
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes
+
+  homebrew:
+    needs: release
+    uses: ./.github/workflows/update_homebrew_formula.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit

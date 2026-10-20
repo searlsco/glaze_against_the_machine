@@ -29,7 +29,9 @@ else if (process.env.FAKE_MODE === 'hang') {
 }
 else if (process.env.FAKE_MODE === 'hang-child') {
   const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:['ignore','inherit','inherit']});
-  fs.writeFileSync(process.env.FAKE_CAPTURE, String(child.pid));
+  // Publish readiness only after the PID is written; file creation can wake the watcher before a write completes.
+  fs.writeFileSync(process.env.FAKE_CAPTURE + '.pending', String(child.pid));
+  fs.renameSync(process.env.FAKE_CAPTURE + '.pending', process.env.FAKE_CAPTURE);
   setInterval(() => {}, 1000);
 }
 else {

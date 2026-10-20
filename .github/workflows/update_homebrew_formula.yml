@@ -1,0 +1,87 @@
+name: Update Homebrew Formula
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing release tag to distribute
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to distribute (for example, v1.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-formula-update
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      FORMULA_PATH: Formula/glaze_against_the_machine.rb
+    steps:
+      - name: Checkout release formula template
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Preserve release formula template
+        run: cp homebrew/glaze_against_the_machine.rb.in "$RUNNER_TEMP/formula.rb.in"
+
+      - name: Validate release and compute checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          TAR_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          curl --fail --location --silent --show-error "$TAR_URL" --output /tmp/release.tar.gz
+          echo "TAR_URL=$TAR_URL" >> "$GITHUB_ENV"
+          echo "SHA256=$(sha256sum /tmp/release.tar.gz | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Checkout tap
+        uses: actions/checkout@v7
+        with:
+          repository: searlsco/homebrew-tap
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        run: |
+          python3 <<'PY'
+          import os, pathlib
+          path = pathlib.Path(os.environ['FORMULA_PATH'])
+          source = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'formula.rb.in').read_text()
+          for key in ['TAR_URL', 'SHA256']:
+              marker = f'@{key}@'
+              if source.count(marker) != 1:
+                  raise SystemExit(f'Expected exactly one {marker} in formula template')
+              source = source.replace(marker, os.environ[key])
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(source)
+          PY
+          ruby -c "$FORMULA_PATH"
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.email "208552577+Bitsly@users.noreply.github.com"
+          git config user.name bitsly
+          git add "$FORMULA_PATH"
+          if git diff --cached --quiet -- "$FORMULA_PATH"; then
+            echo "Formula is already up to date."
+            exit 0
+          fi
+          git commit -m "glaze_against_the_machine ${RELEASE_TAG}: bump formula"
+          git pull --rebase origin main
+          git push origin HEAD:main

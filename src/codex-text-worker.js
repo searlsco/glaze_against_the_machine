@@ -94,7 +94,7 @@ export class CodexTextWorker {
         }
       });
       await this.rpc(state, 'initialize', {
-        clientInfo: { name: 'glaze_against_the_machine', title: 'Glaze Against the Machine', version: '0.3.1' },
+        clientInfo: { name: 'glaze_against_the_machine', title: 'Glaze Against the Machine', version: '1.0.0' },
         capabilities: { experimentalApi: true },
       });
       child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
